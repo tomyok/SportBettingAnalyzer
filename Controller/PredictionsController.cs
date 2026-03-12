@@ -16,14 +16,13 @@ namespace SportsBettingAnalyzer.Controller
             _context = context;
         }
 
-        //1 buscar equipo local
-        //2 buscar equipo visitante
-        //3 obtener sus partidos
-        //4 calcular promedio de goles
-        //5 calcular goles esperados
-        //6 devolver resultado
         [HttpGet]
-        public async Task<IActionResult> GetPrediction(int homeTeamId, int awayTeamId)
+        public async Task<IActionResult> GetPrediction(
+            int homeTeamId,
+            int awayTeamId,
+            double homeOdd,
+            double drawOdd,
+            double awayOdd)
         {
             var homeTeam = await _context.Teams.FindAsync(homeTeamId);
             var awayTeam = await _context.Teams.FindAsync(awayTeamId);
@@ -31,6 +30,7 @@ namespace SportsBettingAnalyzer.Controller
             if (homeTeam == null || awayTeam == null)
                 return NotFound("One or both teams not found");
 
+            // 1) Partidos de cada equipo
             var homeMatches = await _context.Matches
                 .Where(m => m.HomeTeamId == homeTeamId || m.AwayTeamId == homeTeamId)
                 .ToListAsync();
@@ -39,6 +39,7 @@ namespace SportsBettingAnalyzer.Controller
                 .Where(m => m.HomeTeamId == awayTeamId || m.AwayTeamId == awayTeamId)
                 .ToListAsync();
 
+            // 2) Goles a favor / en contra
             double homeGoalsFor = 0;
             double homeGoalsAgainst = 0;
 
@@ -73,6 +74,7 @@ namespace SportsBettingAnalyzer.Controller
                 }
             }
 
+            // 3) Promedios
             double avgGoalsForHome = homeMatches.Count > 0 ? homeGoalsFor / homeMatches.Count : 0;
             double avgGoalsAgainstHome = homeMatches.Count > 0 ? homeGoalsAgainst / homeMatches.Count : 0;
 
@@ -82,14 +84,88 @@ namespace SportsBettingAnalyzer.Controller
             double expectedGoalsHome = (avgGoalsForHome + avgGoalsAgainstAway) / 2;
             double expectedGoalsAway = (avgGoalsForAway + avgGoalsAgainstHome) / 2;
 
+            // 4) Expected goals
+            double[] homeGoalProb = new double[6];
+            double[] awayGoalProb = new double[6];
+
+            for (int i = 0; i <= 5; i++)
+            {
+                homeGoalProb[i] = Poisson(expectedGoalsHome, i);
+                awayGoalProb[i] = Poisson(expectedGoalsAway, i);
+            }
+
+            // 6) Probabilidades de resultado
+            double homeWinProbability = 0;
+            double drawProbability = 0;
+            double awayWinProbability = 0;
+
+            for (int i = 0; i <= 5; i++)
+            {
+                for (int j = 0; j <= 5; j++)
+                {
+                    double probability = homeGoalProb[i] * awayGoalProb[j];
+
+                    if (i > j)
+                        homeWinProbability += probability;
+                    else if (i == j)
+                        drawProbability += probability;
+                    else
+                        awayWinProbability += probability;
+                }
+            }
+
+            // 7) Value calculation
+            double homeValue = (homeWinProbability * homeOdd) - 1;
+            double drawValue = (drawProbability * drawOdd) - 1;
+            double awayValue = (awayWinProbability * awayOdd) - 1;
+
+            string recommendation = "No value bet";
+
+            if (homeValue > drawValue && homeValue > awayValue && homeValue > 0)
+                recommendation = "Bet Home";
+            else if (drawValue > homeValue && drawValue > awayValue && drawValue > 0)
+                recommendation = "Bet Draw";
+            else if (awayValue > homeValue && awayValue > drawValue && awayValue > 0)
+                recommendation = "Bet Away";
+
             return Ok(new
             {
                 homeTeam = homeTeam.Name,
                 awayTeam = awayTeam.Name,
+
                 expectedGoalsHome,
-                expectedGoalsAway
+                expectedGoalsAway,
+
+                homeWinProbability,
+                drawProbability,
+                awayWinProbability,
+
+                homeOdd,
+                drawOdd,
+                awayOdd,
+
+                homeValue,
+                drawValue,
+                awayValue,
+
+                recommendation
             });
         }
+        private double Poisson(double lambda, int k)
+        {
+            return Math.Pow(lambda, k) * Math.Exp(-lambda) / Factorial(k);
+        }
 
+        private double Factorial(int n)
+        {
+            double result = 1;
+
+            for (int i = 1; i <= n; i++)
+            {
+                result *= i;
+            }
+
+        return result;
+        }
     }
 }
