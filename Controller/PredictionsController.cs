@@ -1,8 +1,11 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SportsBettingAnalyzer.Services;
+using System.Text.Json;
+using SportsBettingAnalyzer.Models;
 
-namespace SportsBettingAnalyzer.Controller
+namespace SportsBettingAnalyzer.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
@@ -10,10 +13,22 @@ namespace SportsBettingAnalyzer.Controller
     public class PredictionsController : ControllerBase
     {
         private readonly AppDbContext _context;
+        private readonly ApiFootballService _apiFootball;
 
-        public PredictionsController(AppDbContext context)
+        public PredictionsController(AppDbContext context, ApiFootballService apiFootball)
         {
             _context = context;
+            _apiFootball = apiFootball;
+        }
+
+        [HttpGet("team-matches")]
+        public async Task<IActionResult> GetTeamMatches(int teamId)
+        {
+            var json = await _apiFootball.GetLastMatches(teamId);
+
+            var matches = JsonSerializer.Deserialize<ApiFootballResponse>(json);
+
+            return Ok(matches.response);
         }
 
         [HttpGet]
@@ -24,62 +39,63 @@ namespace SportsBettingAnalyzer.Controller
             double drawOdd,
             double awayOdd)
         {
-            var homeTeam = await _context.Teams.FindAsync(homeTeamId);
-            var awayTeam = await _context.Teams.FindAsync(awayTeamId);
 
-            if (homeTeam == null || awayTeam == null)
-                return NotFound("One or both teams not found");
+            var homeJson = await _apiFootball.GetLastMatches(homeTeamId);
+            var awayJson = await _apiFootball.GetLastMatches(awayTeamId);
 
             // 1) Partidos de cada equipo
-            var homeMatches = await _context.Matches
-                .Where(m => m.HomeTeamId == homeTeamId || m.AwayTeamId == homeTeamId)
-                .ToListAsync();
+            var homeMatches = JsonSerializer.Deserialize<ApiFootballResponse>(homeJson);
+            var awayMatches = JsonSerializer.Deserialize<ApiFootballResponse>(awayJson);
 
-            var awayMatches = await _context.Matches
-                .Where(m => m.HomeTeamId == awayTeamId || m.AwayTeamId == awayTeamId)
-                .ToListAsync();
+            if (homeMatches?.response == null || awayMatches?.response == null)
+            {
+                return BadRequest("Could not retrieve matches from API-Football");
+            }
 
             // 2) Goles a favor / en contra
             double homeGoalsFor = 0;
             double homeGoalsAgainst = 0;
 
-            foreach (var match in homeMatches)
+            foreach (var match in homeMatches.response.Take(10))
             {
-                if (match.HomeTeamId == homeTeamId)
+                if (match.teams.home.id == homeTeamId)
                 {
-                    homeGoalsFor += match.HomeGoals ?? 0;
-                    homeGoalsAgainst += match.AwayGoals ?? 0;
+                    homeGoalsFor += match.goals.home ?? 0;
+                    homeGoalsAgainst += match.goals.away ?? 0;
                 }
                 else
                 {
-                    homeGoalsFor += match.AwayGoals ?? 0;
-                    homeGoalsAgainst += match.HomeGoals ?? 0;
+                    homeGoalsFor += match.goals.away ?? 0;
+                    homeGoalsAgainst += match.goals.home ?? 0;
                 }
             }
 
             double awayGoalsFor = 0;
             double awayGoalsAgainst = 0;
 
-            foreach (var match in awayMatches)
+            foreach (var match in awayMatches.response.Take(10))
             {
-                if (match.HomeTeamId == awayTeamId)
+                if (match.teams.home.id == awayTeamId)
                 {
-                    awayGoalsFor += match.HomeGoals ?? 0;
-                    awayGoalsAgainst += match.AwayGoals ?? 0;
+                    awayGoalsFor += match.goals.home ?? 0;
+                    awayGoalsAgainst += match.goals.away ?? 0;
                 }
                 else
                 {
-                    awayGoalsFor += match.AwayGoals ?? 0;
-                    awayGoalsAgainst += match.HomeGoals ?? 0;
+                    awayGoalsFor += match.goals.away ?? 0;
+                    awayGoalsAgainst += match.goals.home ?? 0;
                 }
             }
 
-            // 3) Promedios
-            double avgGoalsForHome = homeMatches.Count > 0 ? homeGoalsFor / homeMatches.Count : 0;
-            double avgGoalsAgainstHome = homeMatches.Count > 0 ? homeGoalsAgainst / homeMatches.Count : 0;
+            int homeMatchCount = homeMatches.response.Take(10).Count();
+            int awayMatchCount = awayMatches.response.Take(10).Count();
 
-            double avgGoalsForAway = awayMatches.Count > 0 ? awayGoalsFor / awayMatches.Count : 0;
-            double avgGoalsAgainstAway = awayMatches.Count > 0 ? awayGoalsAgainst / awayMatches.Count : 0;
+            // 3) Promedios
+            double avgGoalsForHome = homeGoalsFor / homeMatchCount;
+            double avgGoalsAgainstHome = homeGoalsAgainst / homeMatchCount;
+
+            double avgGoalsForAway = awayGoalsFor / awayMatchCount;
+            double avgGoalsAgainstAway = awayGoalsAgainst / awayMatchCount;
 
             double expectedGoalsHome = (avgGoalsForHome + avgGoalsAgainstAway) / 2;
             double expectedGoalsAway = (avgGoalsForAway + avgGoalsAgainstHome) / 2;
@@ -128,10 +144,30 @@ namespace SportsBettingAnalyzer.Controller
             else if (awayValue > homeValue && awayValue > drawValue && awayValue > 0)
                 recommendation = "Bet Away";
 
+            // Redondeamos
+            homeWinProbability = Math.Round(homeWinProbability, 3);
+            drawProbability = Math.Round(drawProbability, 3);
+            awayWinProbability = Math.Round(awayWinProbability, 3);
+
+            //nombres de los equipos de los ultimos partidos
+            var firstHomeMatch = homeMatches.response.First();
+
+            string homeTeamName =
+                firstHomeMatch.teams.home.id == homeTeamId
+                ? firstHomeMatch.teams.home.name
+                : firstHomeMatch.teams.away.name;
+
+            var firstAwayMatch = awayMatches.response.First();
+
+            string awayTeamName =
+                firstAwayMatch.teams.home.id == awayTeamId
+                ? firstAwayMatch.teams.home.name
+                : firstAwayMatch.teams.away.name;
+
             return Ok(new
             {
-                homeTeam = homeTeam.Name,
-                awayTeam = awayTeam.Name,
+                homeTeam = homeTeamName,
+                awayTeam = awayTeamName,
 
                 expectedGoalsHome,
                 expectedGoalsAway,
@@ -151,6 +187,21 @@ namespace SportsBettingAnalyzer.Controller
                 recommendation
             });
         }
+
+        [HttpGet("league-matches")]
+        public async Task<IActionResult> GetLeagueMatches(int league)
+        {
+            var json = await _apiFootball.GetLeagueFixtures(league);
+
+            var fixtures = JsonSerializer.Deserialize<ApiFootballResponse>(json);
+
+            if (fixtures?.response == null)
+                return BadRequest("No fixtures found");
+
+            return Ok(fixtures.response);
+        }
+
+
         private double Poisson(double lambda, int k)
         {
             return Math.Pow(lambda, k) * Math.Exp(-lambda) / Factorial(k);
